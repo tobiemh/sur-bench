@@ -1,17 +1,20 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
+use rand::{Rng, SeedableRng};
+use rand::rngs::SmallRng;
 use rayon::scope;
-use serde_json::Value;
+
+use serde::Serialize;
 
 use crate::Args;
 
 pub(crate) struct Benchmark {
     threads: usize,
-    samples: usize,
+    samples: i32,
 }
 
 impl Benchmark {
@@ -22,115 +25,135 @@ impl Benchmark {
         }
     }
 
-    fn run<F>(&self, operation: F) where F: Fn(usize, &mut ValueProvider) + Sync + Send + Copy {
+    pub(crate) fn run<C, P>(&self, client_provider: P) where C: BenchmarkClient + Send, P: BenchmarkClientProvider<C> + Send + Sync {
+        {
+            let mut client = client_provider.create_client();
+            client.prepare();
+        }
+
+        // Run the write benchmark
+        println!("Writes: {:?}", self.run_operation(&client_provider, BenchmarkOperation::WRITE));
+
+        // Run the read benchmark
+        println!("Reads: {:?}", self.run_operation(&client_provider, BenchmarkOperation::READ));
+
+        // Run the read benchmark
+        println!("Deletes: {:?}", self.run_operation(&client_provider, BenchmarkOperation::DELETE));
+    }
+
+    fn run_operation<C, P>(&self, client_provider: &P, operation: BenchmarkOperation) -> Duration
+        where C: BenchmarkClient + Send, P: BenchmarkClientProvider<C> + Send + Sync {
+        let time = Instant::now();
         scope(|s| {
-            let current = Arc::new(AtomicUsize::new(0));
+            let current = Arc::new(AtomicI32::new(0));
             for _ in 0..self.threads {
                 let current = current.clone();
+                let mut client = client_provider.create_client();
                 s.spawn(move |_| {
-                    let mut value_provider = ValueProvider::default();
+                    let mut record_provider = RecordProvider::default();
                     loop {
                         let sample = current.fetch_add(1, Ordering::Relaxed);
                         if sample >= self.samples {
                             break;
                         }
-                        operation(sample, &mut value_provider);
+                        match operation {
+                            BenchmarkOperation::WRITE => {
+                                let record = record_provider.sample();
+                                client.write(sample, record);
+                            }
+                            BenchmarkOperation::READ => client.read(sample),
+                            BenchmarkOperation::DELETE => client.delete(sample)
+                        }
                     }
                 })
             }
         });
-    }
-
-    pub(crate) fn run_writes<S>(&self, sampler: S) -> Duration where S: Sampler {
-        let start = Instant::now();
-        self.run(|sample, vp| sampler.write(sample, vp.sample(sample)));
-        start.elapsed()
-    }
-
-    pub(crate) fn run_reads<S>(&self, sampler: S) -> Duration where S: Sampler {
-        let start = Instant::now();
-        self.run(|sample, _| sampler.read(sample));
-        start.elapsed()
-    }
-
-    pub(crate) fn run_deletes<S>(&self, sampler: S) -> Duration where S: Sampler {
-        let start = Instant::now();
-        self.run(|sample, _| sampler.delete(sample));
-        start.elapsed()
+        time.elapsed()
     }
 }
 
-struct ValueProvider {
-    value: Value,
+#[derive(Clone, Copy)]
+pub(crate) enum BenchmarkOperation {
+    WRITE,
+    READ,
+    DELETE,
 }
 
-impl Default for ValueProvider {
+#[derive(Debug, Serialize, Clone, Default)]
+pub(crate) struct Record {
+    pub(crate) text: String,
+    pub(crate) integer: i32,
+}
+
+struct RecordProvider {
+    rng: SmallRng,
+    record: Record,
+}
+
+impl Default for RecordProvider {
     fn default() -> Self {
         Self {
-            value: Value::Number(0.into()),
+            rng: SmallRng::from_entropy(),
+            record: Default::default(),
         }
     }
 }
 
-impl ValueProvider {
-    fn sample(&mut self, sample: usize) -> &Value {
-        self.value = Value::Number(sample.into());
-        &self.value
+const CHARSET: &[u8; 37] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789";
+
+impl RecordProvider {
+    fn sample(&mut self) -> &Record {
+        self.record.text = (0..50)
+            .map(|_| {
+                let idx = self.rng.gen_range(0..CHARSET.len());
+                CHARSET[idx] as char
+            })
+            .collect();
+        &self.record
     }
 }
 
-// pub(crate) trait Operation {
-//     fn operate(&self, sample: usize, value: &Value);
-// }
-//
-// pub(crate) struct WriteOperation<S> where S: Sampler {
-//     sampler: S,
-// }
-//
-// impl<S> WriteOperation<S> where S: Sampler {
-//     pub(crate) fn new(sampler: S) -> Self {
-//         Self { sampler }
-//     }
-// }
-//
-// impl<S> Operation for WriteOperation<S> where S: Sampler {
-//     fn operate(&self, sample: usize, value: &Value) {
-//         self.sampler.write(sample, value);
-//     }
-// }
+pub(crate) trait BenchmarkClientProvider<C> where C: BenchmarkClient {
+    fn create_client(&self) -> C;
+}
 
-pub(crate) trait Sampler: Sync {
-    fn write(&self, key: usize, value: &Value);
-    fn read(&self, key: usize);
-    fn delete(&self, key: usize);
+pub(crate) trait BenchmarkClient {
+    fn prepare(&mut self);
+    fn write(&mut self, key: i32, record: &Record);
+    fn read(&mut self, key: i32);
+    fn delete(&mut self, key: i32);
 }
 
 
-pub(crate) type DryDatabase = Arc<RwLock<HashMap<usize, Value>>>;
+pub(crate) type DryDatabase = Arc<RwLock<HashMap<i32, Record>>>;
 
-pub(crate) struct DrySampler {
+#[derive(Default)]
+pub(crate) struct DryClientProvider {
     database: DryDatabase,
 }
 
-
-impl DrySampler {
-    pub(crate) fn new(database: DryDatabase) -> Self {
-        Self {
-            database,
-        }
+impl BenchmarkClientProvider<DryClient> for DryClientProvider {
+    fn create_client(&self) -> DryClient {
+        DryClient { database: self.database.clone() }
     }
 }
 
-impl Sampler for DrySampler {
-    fn write(&self, sample: usize, value: &Value) {
-        self.database.write().insert(sample, value.clone());
+pub(crate) struct DryClient {
+    database: DryDatabase,
+}
+
+impl BenchmarkClient for DryClient {
+    fn prepare(&mut self) {}
+
+    fn write(&mut self, sample: i32, record: &Record) {
+        self.database.write().insert(sample, record.clone());
     }
 
-    fn read(&self, sample: usize) {
+    fn read(&mut self, sample: i32) {
         assert!(self.database.read().get(&sample).is_some());
     }
 
-    fn delete(&self, sample: usize) {
+    fn delete(&mut self, sample: i32) {
         assert!(self.database.write().remove(&sample).is_some());
     }
 }

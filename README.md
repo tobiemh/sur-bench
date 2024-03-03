@@ -1,4 +1,9 @@
 # sur-bench
 
+```bash
+cargo run -r -- -d dry -s 100000 -t 3
+```
 
-cargo run -r -- -d dry -s 1000000 -t 1
+```bash
+cargo run -r -- -i postgres -d postgresql -s 100000 -t 3
+```

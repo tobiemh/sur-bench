@@ -8,17 +8,19 @@ pub(crate) struct DockerContainer {
 }
 
 impl DockerContainer {
-    pub fn start(image: &str) -> Self {
+    pub fn start(image: &str, args: Arguments) -> Self {
         info!("Start Docker image {image}");
-        let args =
-            Arguments::new(["run", image]);
-        let id = Self::docker(args);
+        let mut arguments =
+            Arguments::new(["run"]);
+        arguments.add(args.0);
+        arguments.add(["-d", image]);
+        let id = Self::docker(arguments);
         Self {
             id,
             running: true,
         }
     }
-    
+
     pub fn stop(&mut self) {
         if self.running {
             info!("Stopping Docker container {}", self.id);
@@ -49,10 +51,10 @@ impl Drop for DockerContainer {
     }
 }
 
-struct Arguments(Vec<String>);
+pub(crate) struct Arguments(Vec<String>);
 
 impl Arguments {
-    fn new<I, S>(args: I) -> Self
+    pub(crate) fn new<I, S>(args: I) -> Self
         where
             I: IntoIterator<Item=S>,
             S: Into<String>,
@@ -62,7 +64,7 @@ impl Arguments {
         a
     }
 
-    fn add<I, S>(&mut self, args: I)
+    pub(crate) fn add<I, S>(&mut self, args: I)
         where
             I: IntoIterator<Item=S>,
             S: Into<String>,
