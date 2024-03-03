@@ -1,4 +1,4 @@
-use postgres::{Client, NoTls};
+use tokio_postgres::{Client, NoTls};
 
 use crate::benchmark::{BenchmarkClient, BenchmarkClientProvider, Record};
 
@@ -6,9 +6,16 @@ use crate::benchmark::{BenchmarkClient, BenchmarkClientProvider, Record};
 pub(crate) struct PostgresClientProvider {}
 
 impl BenchmarkClientProvider<PostgresClient> for PostgresClientProvider {
-    fn create_client(&self) -> PostgresClient {
+    async fn create_client(&self) -> PostgresClient {
+        let (client, connection) =
+            tokio_postgres::connect("host=localhost user=postgres password=postgres", NoTls).await.unwrap();
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("connection error: {}", e);
+            }
+        });
         PostgresClient {
-            client: Client::connect("host=localhost user=postgres password=postgres", NoTls).unwrap()
+            client,
         }
     }
 }
@@ -18,33 +25,33 @@ pub(crate) struct PostgresClient {
 }
 
 impl BenchmarkClient for PostgresClient {
-    fn prepare(&mut self) {
+    async fn prepare(&mut self) {
         self.client.batch_execute("
     CREATE TABLE record (
         id      SERIAL PRIMARY KEY,
         text    TEXT NOT NULL,
         integer    INTEGER NOT NULL
-    )").unwrap();
+    )").await.unwrap();
     }
 
-    fn write(&mut self, key: i32, record: &Record) {
+    async fn write(&mut self, key: i32, record: &Record) {
         let res = self.client.execute(
             "INSERT INTO record (id, text, integer) VALUES ($1, $2, $3)",
             &[&key, &record.text, &record.integer],
-        ).unwrap();
+        ).await.unwrap();
         assert_eq!(res, 1);
     }
 
-    fn read(&mut self, key: i32) {
-        let res = self.client.query("SELECT id, text, integer FROM record WHERE id=$1", &[&key]).unwrap();
+    async fn read(&mut self, key: i32) {
+        let res = self.client.query("SELECT id, text, integer FROM record WHERE id=$1", &[&key]).await.unwrap();
         assert_eq!(res.len(), 1);
     }
 
-    fn delete(&mut self, key: i32) {
+    async fn delete(&mut self, key: i32) {
         let res = self.client.execute(
             "DELETE FROM record WHERE id=$1",
             &[&key],
-        ).unwrap();
+        ).await.unwrap();
         assert_eq!(res, 1);
     }
 }

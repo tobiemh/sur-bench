@@ -3,12 +3,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
-use parking_lot::RwLock;
 use rand::{Rng, SeedableRng};
 use rand::rngs::SmallRng;
 use rayon::scope;
-
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use tokio::runtime::{Builder, Runtime};
+use tokio::sync::RwLock;
 
 use crate::Args;
 
@@ -26,9 +26,12 @@ impl Benchmark {
     }
 
     pub(crate) fn run<C, P>(&self, client_provider: P) where C: BenchmarkClient + Send, P: BenchmarkClientProvider<C> + Send + Sync {
-        {
-            let mut client = client_provider.create_client();
-            client.prepare();
+        { // Prepare
+            let runtime = Runtime::new().expect("Failed to create a runtime");
+            runtime.block_on(async {
+                let mut client = client_provider.create_client().await;
+                client.prepare().await;
+            });
         }
 
         // Run the write benchmark
@@ -48,23 +51,30 @@ impl Benchmark {
             let current = Arc::new(AtomicI32::new(0));
             for _ in 0..self.threads {
                 let current = current.clone();
-                let mut client = client_provider.create_client();
                 s.spawn(move |_| {
                     let mut record_provider = RecordProvider::default();
-                    loop {
-                        let sample = current.fetch_add(1, Ordering::Relaxed);
-                        if sample >= self.samples {
-                            break;
-                        }
-                        match operation {
-                            BenchmarkOperation::WRITE => {
-                                let record = record_provider.sample();
-                                client.write(sample, record);
+                    let runtime = Builder::new_multi_thread()
+                        .worker_threads(4) // Set the number of worker threads
+                        .enable_all() // Enables all runtime features, including I/O and time
+                        .build()
+                        .expect("Failed to create a runtime");
+                    runtime.block_on(async {
+                        let mut client = client_provider.create_client().await;
+                        loop {
+                            let sample = current.fetch_add(1, Ordering::Relaxed);
+                            if sample >= self.samples {
+                                break;
                             }
-                            BenchmarkOperation::READ => client.read(sample),
-                            BenchmarkOperation::DELETE => client.delete(sample)
+                            match operation {
+                                BenchmarkOperation::WRITE => {
+                                    let record = record_provider.sample();
+                                    client.write(sample, record).await;
+                                }
+                                BenchmarkOperation::READ => client.read(sample).await,
+                                BenchmarkOperation::DELETE => client.delete(sample).await
+                            }
                         }
-                    }
+                    });
                 })
             }
         });
@@ -79,7 +89,7 @@ pub(crate) enum BenchmarkOperation {
     DELETE,
 }
 
-#[derive(Debug, Serialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub(crate) struct Record {
     pub(crate) text: String,
     pub(crate) integer: i32,
@@ -114,14 +124,14 @@ impl RecordProvider {
 }
 
 pub(crate) trait BenchmarkClientProvider<C> where C: BenchmarkClient {
-    fn create_client(&self) -> C;
+    async fn create_client(&self) -> C;
 }
 
 pub(crate) trait BenchmarkClient {
-    fn prepare(&mut self);
-    fn write(&mut self, key: i32, record: &Record);
-    fn read(&mut self, key: i32);
-    fn delete(&mut self, key: i32);
+    async fn prepare(&mut self);
+    async fn write(&mut self, key: i32, record: &Record);
+    async fn read(&mut self, key: i32);
+    async fn delete(&mut self, key: i32);
 }
 
 
@@ -133,7 +143,7 @@ pub(crate) struct DryClientProvider {
 }
 
 impl BenchmarkClientProvider<DryClient> for DryClientProvider {
-    fn create_client(&self) -> DryClient {
+    async fn create_client(&self) -> DryClient {
         DryClient { database: self.database.clone() }
     }
 }
@@ -143,18 +153,18 @@ pub(crate) struct DryClient {
 }
 
 impl BenchmarkClient for DryClient {
-    fn prepare(&mut self) {}
+    async fn prepare(&mut self) {}
 
-    fn write(&mut self, sample: i32, record: &Record) {
-        self.database.write().insert(sample, record.clone());
+    async fn write(&mut self, sample: i32, record: &Record) {
+        self.database.write().await.insert(sample, record.clone());
     }
 
-    fn read(&mut self, sample: i32) {
-        assert!(self.database.read().get(&sample).is_some());
+    async fn read(&mut self, sample: i32) {
+        assert!(self.database.read().await.get(&sample).is_some());
     }
 
-    fn delete(&mut self, sample: i32) {
-        assert!(self.database.write().remove(&sample).is_some());
+    async fn delete(&mut self, sample: i32) {
+        assert!(self.database.write().await.remove(&sample).is_some());
     }
 }
 

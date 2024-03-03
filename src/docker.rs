@@ -8,12 +8,17 @@ pub(crate) struct DockerContainer {
 }
 
 impl DockerContainer {
-    pub fn start(image: &str, args: Arguments) -> Self {
+    pub fn start(image: &str, prev: Option<Arguments>, after: Option<Arguments>) -> Self {
         info!("Start Docker image {image}");
         let mut arguments =
             Arguments::new(["run"]);
-        arguments.add(args.0);
+        if let Some(prev) = prev {
+            arguments.add(prev.0);
+        }
         arguments.add(["-d", image]);
+        if let Some(after) = after {
+            arguments.add(after.0);
+        }
         let id = Self::docker(arguments);
         Self {
             id,

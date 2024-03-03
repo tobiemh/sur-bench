@@ -6,6 +6,7 @@ use clap::{Parser, ValueEnum};
 use crate::benchmark::{Benchmark, DryClientProvider};
 use crate::docker::{Arguments, DockerContainer};
 use crate::postgres::PostgresClientProvider;
+use crate::surrealdb::SurrealDBClientProvider;
 
 mod docker;
 mod benchmark;
@@ -43,23 +44,27 @@ pub(crate) enum Database {
 
 impl Database {
     fn start_docker(&self, image: &str) -> DockerContainer {
-        let args = match self {
+        let (prev, after) = match self {
             Database::Dry => todo!(),
-            Database::SurrealDB => todo!(),
+            Database::SurrealDB => {
+                (Some(Arguments::new(["-p", "127.0.0.1:8000:8000"])),
+                 Some(Arguments::new(["start", "--auth", "--user", "root", "--pass", "root", "memory"])))
+            }
             Database::MongoDB => todo!(),
             Database::Postgresql => {
-                Arguments::new(["-p", "127.0.0.1:5432:5432", "-e", "POSTGRES_PASSWORD=postgres"])
+                (Some(Arguments::new(["-p", "127.0.0.1:5432:5432", "-e", "POSTGRES_PASSWORD=postgres"])),
+                 None)
             }
         };
-        let container = DockerContainer::start(image, args);
-        sleep(Duration::from_secs(5));
+        let container = DockerContainer::start(image, prev, after);
+        sleep(Duration::from_secs(10));
         container
     }
 
     fn run(&self, benchmark: &Benchmark) {
         match self {
             Database::Dry => benchmark.run(DryClientProvider::default()),
-            Database::SurrealDB => todo!(),
+            Database::SurrealDB => benchmark.run(SurrealDBClientProvider::default()),
             Database::MongoDB => todo!(),
             Database::Postgresql => benchmark.run(PostgresClientProvider::default()),
         }
