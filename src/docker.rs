@@ -1,24 +1,26 @@
 use std::process::Command;
 
-use tracing::{error, info};
+use log::{error, info};
 
 pub(crate) struct DockerContainer {
     id: String,
     running: bool,
 }
 
+pub(crate) struct DockerParams {
+    pub(crate) image: &'static str,
+    pub(crate) pre_args: &'static str,
+    pub(crate) post_args: &'static str,
+}
+
 impl DockerContainer {
-    pub fn start(image: &str, prev: Option<Arguments>, after: Option<Arguments>) -> Self {
-        info!("Start Docker image {image}");
-        let mut arguments =
-            Arguments::new(["run"]);
-        if let Some(prev) = prev {
-            arguments.add(prev.0);
-        }
-        arguments.add(["-d", image]);
-        if let Some(after) = after {
-            arguments.add(after.0);
-        }
+    pub(crate) fn start(image: Option<String>, p: &DockerParams) -> Self {
+        let image = image.unwrap_or(p.image.to_string());
+        info!("Start Docker image {}", image);
+        let mut arguments = Arguments::new(["run"]);
+        arguments.append(p.pre_args);
+        arguments.add(["-d", &image]);
+        arguments.append(p.post_args);
         let id = Self::docker(arguments);
         Self {
             id,
@@ -26,7 +28,13 @@ impl DockerContainer {
         }
     }
 
-    pub fn stop(&mut self) {
+    pub(crate) fn logs(&self) {
+        info!("Logging Docker container {}", self.id);
+        let stdout = Self::docker(Arguments::new(["logs", &self.id]));
+        println!("{}", stdout);
+    }
+
+    pub(crate) fn stop(&mut self) {
         if self.running {
             info!("Stopping Docker container {}", self.id);
             Self::docker(Arguments::new(["stop", &self.id]));
@@ -35,8 +43,9 @@ impl DockerContainer {
     }
     fn docker(args: Arguments) -> String {
         let mut command = Command::new("docker");
-
-        let output = command.args(args.0).output().unwrap();
+        let command = command.args(args.0);
+        info!("{:?}", command);
+        let output = command.output().unwrap();
         let std_out = String::from_utf8(output.stdout).unwrap().trim().to_string();
         if !output.stderr.is_empty() {
             error!("{}", String::from_utf8(output.stderr).unwrap());
@@ -59,7 +68,7 @@ impl Drop for DockerContainer {
 pub(crate) struct Arguments(Vec<String>);
 
 impl Arguments {
-    pub(crate) fn new<I, S>(args: I) -> Self
+    fn new<I, S>(args: I) -> Self
         where
             I: IntoIterator<Item=S>,
             S: Into<String>,
@@ -69,7 +78,7 @@ impl Arguments {
         a
     }
 
-    pub(crate) fn add<I, S>(&mut self, args: I)
+    fn add<I, S>(&mut self, args: I)
         where
             I: IntoIterator<Item=S>,
             S: Into<String>,
@@ -77,5 +86,10 @@ impl Arguments {
         for arg in args {
             self.0.push(arg.into());
         }
+    }
+
+    fn append(&mut self, args: &str) {
+        let split: Vec<&str> = args.split(' ').filter(|a| !a.is_empty()).collect();
+        self.add(split);
     }
 }

@@ -1,15 +1,14 @@
-use std::thread::sleep;
-use std::time::Duration;
-
+use anyhow::Result;
 use clap::{Parser, ValueEnum};
+use log::{error, info};
 
 use crate::benchmark::{Benchmark, DryClientProvider};
-use crate::docker::{Arguments, DockerContainer};
-use crate::postgres::PostgresClientProvider;
-use crate::surrealdb::SurrealDBClientProvider;
+use crate::docker::DockerContainer;
+use crate::postgres::{POSTGRES_DOCKER_PARAMS, PostgresClientProvider};
+use crate::surrealdb::{SURREAL_DOCKER_PARAMS, SurrealDBClientProvider};
 
-mod docker;
 mod benchmark;
+mod docker;
 mod postgres;
 mod surrealdb;
 
@@ -33,7 +32,6 @@ pub(crate) struct Args {
     pub(crate) threads: usize,
 }
 
-
 #[derive(ValueEnum, Debug, Clone)]
 pub(crate) enum Database {
     Dry,
@@ -43,25 +41,18 @@ pub(crate) enum Database {
 }
 
 impl Database {
-    fn start_docker(&self, image: &str) -> DockerContainer {
-        let (prev, after) = match self {
-            Database::Dry => todo!(),
-            Database::SurrealDB => {
-                (Some(Arguments::new(["-p", "127.0.0.1:8000:8000"])),
-                 Some(Arguments::new(["start", "--auth", "--user", "root", "--pass", "root", "memory"])))
-            }
+    fn start_docker(&self, image: Option<String>) -> Option<DockerContainer> {
+        let params = match self {
+            Database::Dry => return None,
+            Database::SurrealDB => SURREAL_DOCKER_PARAMS,
             Database::MongoDB => todo!(),
-            Database::Postgresql => {
-                (Some(Arguments::new(["-p", "127.0.0.1:5432:5432", "-e", "POSTGRES_PASSWORD=postgres"])),
-                 None)
-            }
+            Database::Postgresql => POSTGRES_DOCKER_PARAMS,
         };
-        let container = DockerContainer::start(image, prev, after);
-        sleep(Duration::from_secs(10));
-        container
+        let container = DockerContainer::start(image, &params);
+        Some(container)
     }
 
-    fn run(&self, benchmark: &Benchmark) {
+    fn run(&self, benchmark: &Benchmark) -> Result<()> {
         match self {
             Database::Dry => benchmark.run(DryClientProvider::default()),
             Database::SurrealDB => benchmark.run(SurrealDBClientProvider::default()),
@@ -72,21 +63,28 @@ impl Database {
 }
 
 fn main() {
+    // Initialise the logger
+    env_logger::init();
+    info!("Benchmark started!");
+
+    // Parse the command line arguments
     let args = Args::parse();
-    println!("Image: {:?}", args.image);
-    println!("Database: {:?}", args.database);
-    println!("Samples: {:?}", args.samples);
-    println!("Threads: {:?}", args.threads);
 
     // Prepare the benchmark
     let benchmark = Benchmark::new(&args);
 
     // Spawn the docker image if any
-    let mut container = args.image.map(|i| args.database.start_docker(&i));
+    let mut container = args.database.start_docker(args.image);
 
-    args.database.run(&benchmark);
+    // Run the benchmark
+    if let Err(e) = args.database.run(&benchmark) {
+        error!("Error: {}", e);
+        if let Some(container) = &container {
+            container.logs();
+        }
+    }
 
-    // Stop the container
+    // Stop the container (if any)
     if let Some(mut container) = container.take() {
         container.stop();
     }

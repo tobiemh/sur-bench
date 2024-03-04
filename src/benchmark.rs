@@ -1,14 +1,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::time::{Duration, Instant, SystemTime};
 
+use anyhow::{bail, Result};
+use log::{error, info, warn};
 use rand::{Rng, SeedableRng};
 use rand::rngs::SmallRng;
 use rayon::scope;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::RwLock;
+use tokio::time::sleep;
 
 use crate::Args;
 
@@ -25,32 +28,67 @@ impl Benchmark {
         }
     }
 
-    pub(crate) fn run<C, P>(&self, client_provider: P) where C: BenchmarkClient + Send, P: BenchmarkClientProvider<C> + Send + Sync {
-        { // Prepare
+    pub async fn wait_for_client<C, P>(client_provider: &P, time_out: Duration) -> Result<C> where
+        C: BenchmarkClient + Send,
+        P: BenchmarkClientProvider<C> + Send + Sync, {
+        sleep(Duration::from_secs(2)).await;
+        let start = SystemTime::now();
+        while start.elapsed()? < time_out {
+            sleep(Duration::from_secs(2)).await;
+            info!("Create client connection");
+            if let Ok(client) = client_provider.create_client().await {
+                return Ok(client);
+            }
+            warn!("DB not yet responding");
+        }
+        bail!("Can't create the client")
+    }
+
+    pub(crate) fn run<C, P>(&self, client_provider: P) -> Result<()>
+        where
+            C: BenchmarkClient + Send,
+            P: BenchmarkClientProvider<C> + Send + Sync,
+    {
+        {
+            // Prepare
             let runtime = Runtime::new().expect("Failed to create a runtime");
             runtime.block_on(async {
-                let mut client = client_provider.create_client().await;
-                client.prepare().await;
-            });
+                let mut client = Self::wait_for_client(&client_provider, Duration::from_secs(60)).await?;
+                client.prepare().await?;
+                Ok::<(), anyhow::Error>(())
+            })?;
         }
 
         // Run the write benchmark
-        println!("Writes: {:?}", self.run_operation(&client_provider, BenchmarkOperation::WRITE));
+        info!("Start writes benchmark");
+        let writes_elapsed = self.run_operation(&client_provider, BenchmarkOperation::WRITE)?;
+        println!("Writes: {:?}", writes_elapsed);
 
         // Run the read benchmark
-        println!("Reads: {:?}", self.run_operation(&client_provider, BenchmarkOperation::READ));
+        info!("Start reads benchmark");
+        let reads_elapsed = self.run_operation(&client_provider, BenchmarkOperation::READ)?;
+        println!("Reads: {:?}", reads_elapsed);
 
         // Run the read benchmark
-        println!("Deletes: {:?}", self.run_operation(&client_provider, BenchmarkOperation::DELETE));
+        info!("Start deletes benchmark");
+        let deletes_elapsed = self.run_operation(&client_provider, BenchmarkOperation::DELETE)?;
+        println!("Deletes: {:?}", deletes_elapsed);
+
+        Ok(())
     }
 
-    fn run_operation<C, P>(&self, client_provider: &P, operation: BenchmarkOperation) -> Duration
-        where C: BenchmarkClient + Send, P: BenchmarkClientProvider<C> + Send + Sync {
+    fn run_operation<C, P>(&self, client_provider: &P, operation: BenchmarkOperation) -> Result<Duration>
+        where
+            C: BenchmarkClient + Send,
+            P: BenchmarkClientProvider<C> + Send + Sync,
+    {
         let time = Instant::now();
+        let error = Arc::new(AtomicBool::new(false));
         scope(|s| {
             let current = Arc::new(AtomicI32::new(0));
             for _ in 0..self.threads {
                 let current = current.clone();
+                let error = error.clone();
                 s.spawn(move |_| {
                     let mut record_provider = RecordProvider::default();
                     let runtime = Builder::new_multi_thread()
@@ -58,8 +96,8 @@ impl Benchmark {
                         .enable_all() // Enables all runtime features, including I/O and time
                         .build()
                         .expect("Failed to create a runtime");
-                    runtime.block_on(async {
-                        let mut client = client_provider.create_client().await;
+                    if let Err(e) = runtime.block_on(async {
+                        let mut client = client_provider.create_client().await?;
                         loop {
                             let sample = current.fetch_add(1, Ordering::Relaxed);
                             if sample >= self.samples {
@@ -68,17 +106,24 @@ impl Benchmark {
                             match operation {
                                 BenchmarkOperation::WRITE => {
                                     let record = record_provider.sample();
-                                    client.write(sample, record).await;
+                                    client.write(sample, record).await?;
                                 }
-                                BenchmarkOperation::READ => client.read(sample).await,
-                                BenchmarkOperation::DELETE => client.delete(sample).await
+                                BenchmarkOperation::READ => client.read(sample).await?,
+                                BenchmarkOperation::DELETE => client.delete(sample).await?,
                             }
                         }
-                    });
-                })
+                        Ok::<(), anyhow::Error>(())
+                    }) {
+                        error!("{}", e);
+                        error.store(true, Ordering::Relaxed);
+                    }
+                });
             }
         });
-        time.elapsed()
+        if error.load(Ordering::Relaxed) {
+            bail!("Benchmark error");
+        }
+        Ok(time.elapsed())
     }
 }
 
@@ -123,17 +168,19 @@ impl RecordProvider {
     }
 }
 
-pub(crate) trait BenchmarkClientProvider<C> where C: BenchmarkClient {
-    async fn create_client(&self) -> C;
+pub(crate) trait BenchmarkClientProvider<C>
+    where
+        C: BenchmarkClient,
+{
+    async fn create_client(&self) -> Result<C>;
 }
 
 pub(crate) trait BenchmarkClient {
-    async fn prepare(&mut self);
-    async fn write(&mut self, key: i32, record: &Record);
-    async fn read(&mut self, key: i32);
-    async fn delete(&mut self, key: i32);
+    async fn prepare(&mut self) -> Result<()>;
+    async fn write(&mut self, key: i32, record: &Record) -> Result<()>;
+    async fn read(&mut self, key: i32) -> Result<()>;
+    async fn delete(&mut self, key: i32) -> Result<()>;
 }
-
 
 pub(crate) type DryDatabase = Arc<RwLock<HashMap<i32, Record>>>;
 
@@ -143,8 +190,10 @@ pub(crate) struct DryClientProvider {
 }
 
 impl BenchmarkClientProvider<DryClient> for DryClientProvider {
-    async fn create_client(&self) -> DryClient {
-        DryClient { database: self.database.clone() }
+    async fn create_client(&self) -> Result<DryClient> {
+        Ok(DryClient {
+            database: self.database.clone(),
+        })
     }
 }
 
@@ -153,18 +202,22 @@ pub(crate) struct DryClient {
 }
 
 impl BenchmarkClient for DryClient {
-    async fn prepare(&mut self) {}
+    async fn prepare(&mut self) -> Result<()> {
+        Ok(())
+    }
 
-    async fn write(&mut self, sample: i32, record: &Record) {
+    async fn write(&mut self, sample: i32, record: &Record) -> Result<()> {
         self.database.write().await.insert(sample, record.clone());
+        Ok(())
     }
 
-    async fn read(&mut self, sample: i32) {
+    async fn read(&mut self, sample: i32) -> Result<()> {
         assert!(self.database.read().await.get(&sample).is_some());
+        Ok(())
     }
 
-    async fn delete(&mut self, sample: i32) {
+    async fn delete(&mut self, sample: i32) -> Result<()> {
         assert!(self.database.write().await.remove(&sample).is_some());
+        Ok(())
     }
 }
-
