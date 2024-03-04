@@ -73,6 +73,9 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@v4
 
+      - name: Build release
+        run: cargo build -r
+
       - name: Bench Dry
         run: cargo run -r -- -d dry -s 25000 -t 3
 
