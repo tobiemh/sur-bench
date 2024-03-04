@@ -43,6 +43,16 @@ impl BenchmarkClientProvider<SurrealDBClient> for SurrealDBClientProvider {
 		// Select a specific namespace / database
 		db.use_ns("test").use_db("test").await?;
 
+		// Ensure the table exists. This wouldn't
+		// normally be an issue, as SurrealDB is
+		// schemaless, but because we are testing
+		// benchmarking of concurrent, optimistic
+		// transactions, each initial concurrent
+		// insert/create into the table attempts
+		// to setup the NS+DB+TB, and this causes
+		// 'resource busy' key conflict failures.
+		db.query("DEFINE TABLE record").await?;
+
 		Ok(SurrealDBClient {
 			db,
 		})
