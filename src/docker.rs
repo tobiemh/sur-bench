@@ -4,6 +4,7 @@ use log::{error, info};
 
 pub(crate) struct DockerContainer {
 	id: String,
+	image: String,
 	running: bool,
 }
 
@@ -14,18 +15,22 @@ pub(crate) struct DockerParams {
 }
 
 impl DockerContainer {
-	pub(crate) fn start(image: Option<String>, p: &DockerParams) -> Self {
-		let image = image.unwrap_or(p.image.to_string());
+	pub(crate) fn start(image: String, pre: &str, post: &str) -> Self {
 		info!("Start Docker image {}", image);
 		let mut arguments = Arguments::new(["run"]);
-		arguments.append(p.pre_args);
+		arguments.append(pre);
 		arguments.add(["-d", &image]);
-		arguments.append(p.post_args);
+		arguments.append(post);
 		let id = Self::docker(arguments);
 		Self {
 			id,
+			image,
 			running: true,
 		}
+	}
+
+	pub(crate) fn image(&self) -> &str {
+		&self.image
 	}
 
 	pub(crate) fn logs(&self) {

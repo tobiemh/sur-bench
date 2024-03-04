@@ -1,5 +1,8 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::fmt::{Display, Formatter};
+use std::io;
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -18,6 +21,20 @@ use crate::Args;
 pub(crate) struct Benchmark {
 	threads: usize,
 	samples: i32,
+}
+
+pub(crate) struct BenchmarkResult {
+	writes: Duration,
+	reads: Duration,
+	deletes: Duration,
+}
+
+impl Display for BenchmarkResult {
+	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+		writeln!(f, "Writes: {:?}", self.writes)?;
+		writeln!(f, "Reads: {:?}", self.reads)?;
+		writeln!(f, "Deletes: {:?}", self.deletes)
+	}
 }
 
 impl Benchmark {
@@ -46,7 +63,7 @@ impl Benchmark {
 		bail!("Can't create the client")
 	}
 
-	pub(crate) fn run<C, P>(&self, client_provider: P) -> Result<()>
+	pub(crate) fn run<C, P>(&self, client_provider: P) -> Result<BenchmarkResult>
 	where
 		C: BenchmarkClient + Send,
 		P: BenchmarkClientProvider<C> + Send + Sync,
@@ -64,20 +81,24 @@ impl Benchmark {
 
 		// Run the write benchmark
 		info!("Start writes benchmark");
-		let writes_elapsed = self.run_operation(&client_provider, BenchmarkOperation::Write)?;
-		println!("Writes: {:?}", writes_elapsed);
+		let writes = self.run_operation(&client_provider, BenchmarkOperation::Write)?;
+		info!("Writes benchmark done");
 
 		// Run the read benchmark
 		info!("Start reads benchmark");
-		let reads_elapsed = self.run_operation(&client_provider, BenchmarkOperation::Read)?;
-		println!("Reads: {:?}", reads_elapsed);
+		let reads = self.run_operation(&client_provider, BenchmarkOperation::Read)?;
+		info!("Reads benchmark done");
 
 		// Run the read benchmark
 		info!("Start deletes benchmark");
-		let deletes_elapsed = self.run_operation(&client_provider, BenchmarkOperation::Delete)?;
-		println!("Deletes: {:?}", deletes_elapsed);
+		let deletes = self.run_operation(&client_provider, BenchmarkOperation::Delete)?;
+		info!("Deletes benchmark done");
 
-		Ok(())
+		Ok(BenchmarkResult {
+			writes,
+			reads,
+			deletes,
+		})
 	}
 
 	fn run_operation<C, P>(
@@ -89,13 +110,16 @@ impl Benchmark {
 		C: BenchmarkClient + Send,
 		P: BenchmarkClientProvider<C> + Send + Sync,
 	{
-		let time = Instant::now();
 		let error = Arc::new(AtomicBool::new(false));
+		let time = Instant::now();
+		let percent = Arc::new(AtomicU8::new(0));
+		print!("0%");
 		scope(|s| {
 			let current = Arc::new(AtomicI32::new(0));
-			for _ in 0..self.threads {
+			for thread_number in 0..self.threads {
 				let current = current.clone();
 				let error = error.clone();
+				let percent = percent.clone();
 				s.spawn(move |_| {
 					let mut record_provider = RecordProvider::default();
 					let runtime = Builder::new_multi_thread()
@@ -104,11 +128,26 @@ impl Benchmark {
 						.build()
 						.expect("Failed to create a runtime");
 					if let Err(e) = runtime.block_on(async {
+						info!("Thread #{thread_number}/{operation:?} starts");
 						let mut client = client_provider.create_client().await?;
-						loop {
+						while !error.load(Ordering::Relaxed) {
 							let sample = current.fetch_add(1, Ordering::Relaxed);
 							if sample >= self.samples {
 								break;
+							}
+							// Calculate and print out the percents
+							{
+								let new_percent = if sample == 0 {
+									0u8
+								} else {
+									(sample * 100 / self.samples) as u8
+								};
+								let old_percent = percent.load(Ordering::Relaxed);
+								if new_percent > old_percent {
+									percent.store(new_percent, Ordering::Relaxed);
+									print!("\r{new_percent}%");
+									io::stdout().flush()?;
+								}
 							}
 							match operation {
 								BenchmarkOperation::Write => {
@@ -119,6 +158,7 @@ impl Benchmark {
 								BenchmarkOperation::Delete => client.delete(sample).await?,
 							}
 						}
+						info!("Thread #{thread_number}/{operation:?} ends");
 						Ok::<(), anyhow::Error>(())
 					}) {
 						error!("{}", e);
@@ -127,6 +167,7 @@ impl Benchmark {
 				});
 			}
 		});
+		println!("\r100%");
 		if error.load(Ordering::Relaxed) {
 			bail!("Benchmark error");
 		}
@@ -134,7 +175,7 @@ impl Benchmark {
 	}
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum BenchmarkOperation {
 	Write,
 	Read,
