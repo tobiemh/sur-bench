@@ -24,16 +24,18 @@ pub(crate) struct Benchmark {
 }
 
 pub(crate) struct BenchmarkResult {
-	writes: Duration,
+	creates: Duration,
 	reads: Duration,
+	updates: Duration,
 	deletes: Duration,
 }
 
 impl Display for BenchmarkResult {
 	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-		writeln!(f, "Writes: {:?}", self.writes)?;
-		writeln!(f, "Reads: {:?}", self.reads)?;
-		writeln!(f, "Deletes: {:?}", self.deletes)
+		writeln!(f, "[C]reates: {:?}", self.creates)?;
+		writeln!(f, "[R]eads: {:?}", self.reads)?;
+		writeln!(f, "[U]pdates: {:?}", self.updates)?;
+		writeln!(f, "[D]eletes: {:?}", self.deletes)
 	}
 }
 
@@ -79,24 +81,30 @@ impl Benchmark {
 			})?;
 		}
 
-		// Run the write benchmark
-		info!("Start writes benchmark");
-		let writes = self.run_operation(&client_provider, BenchmarkOperation::Write)?;
-		info!("Writes benchmark done");
+		// Run the "creates" benchmark
+		info!("Start creates benchmark");
+		let creates = self.run_operation(&client_provider, BenchmarkOperation::Create)?;
+		info!("Creates benchmark done");
 
-		// Run the read benchmark
+		// Run the "reads" benchmark
 		info!("Start reads benchmark");
 		let reads = self.run_operation(&client_provider, BenchmarkOperation::Read)?;
 		info!("Reads benchmark done");
 
-		// Run the read benchmark
+		// Run the "reads" benchmark
+		info!("Start updates benchmark");
+		let updates = self.run_operation(&client_provider, BenchmarkOperation::Update)?;
+		info!("Reads benchmark done");
+
+		// Run the "deletes" benchmark
 		info!("Start deletes benchmark");
 		let deletes = self.run_operation(&client_provider, BenchmarkOperation::Delete)?;
 		info!("Deletes benchmark done");
 
 		Ok(BenchmarkResult {
-			writes,
+			creates,
 			reads,
+			updates,
 			deletes,
 		})
 	}
@@ -150,11 +158,15 @@ impl Benchmark {
 								}
 							}
 							match operation {
-								BenchmarkOperation::Write => {
+								BenchmarkOperation::Create => {
 									let record = record_provider.sample();
-									client.write(sample, record).await?;
+									client.create(sample, record).await?;
 								}
 								BenchmarkOperation::Read => client.read(sample).await?,
+								BenchmarkOperation::Update => {
+									let record = record_provider.sample();
+									client.update(sample, record).await?;
+								}
 								BenchmarkOperation::Delete => client.delete(sample).await?,
 							}
 						}
@@ -177,8 +189,9 @@ impl Benchmark {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum BenchmarkOperation {
-	Write,
+	Create,
 	Read,
+	Update,
 	Delete,
 }
 
@@ -225,8 +238,9 @@ where
 
 pub(crate) trait BenchmarkClient {
 	async fn prepare(&mut self) -> Result<()>;
-	async fn write(&mut self, key: i32, record: &Record) -> Result<()>;
+	async fn create(&mut self, key: i32, record: &Record) -> Result<()>;
 	async fn read(&mut self, key: i32) -> Result<()>;
+	async fn update(&mut self, key: i32, record: &Record) -> Result<()>;
 	async fn delete(&mut self, key: i32) -> Result<()>;
 }
 
@@ -254,8 +268,8 @@ impl BenchmarkClient for DryClient {
 		Ok(())
 	}
 
-	async fn write(&mut self, sample: i32, record: &Record) -> Result<()> {
-		self.database.write().await.insert(sample, record.clone());
+	async fn create(&mut self, sample: i32, record: &Record) -> Result<()> {
+		assert!(self.database.write().await.insert(sample, record.clone()).is_none());
 		Ok(())
 	}
 
@@ -264,6 +278,10 @@ impl BenchmarkClient for DryClient {
 		Ok(())
 	}
 
+	async fn update(&mut self, sample: i32, record: &Record) -> Result<()> {
+		assert!(self.database.write().await.insert(sample, record.clone()).is_some());
+		Ok(())
+	}
 	async fn delete(&mut self, sample: i32) -> Result<()> {
 		assert!(self.database.write().await.remove(&sample).is_some());
 		Ok(())

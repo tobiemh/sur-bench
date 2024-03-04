@@ -48,7 +48,7 @@ impl BenchmarkClient for PostgresClient {
 		Ok(())
 	}
 
-	async fn write(&mut self, key: i32, record: &Record) -> Result<()> {
+	async fn create(&mut self, key: i32, record: &Record) -> Result<()> {
 		let res = self
 			.client
 			.execute(
@@ -64,6 +64,18 @@ impl BenchmarkClient for PostgresClient {
 		let res =
 			self.client.query("SELECT id, text, integer FROM record WHERE id=$1", &[&key]).await?;
 		assert_eq!(res.len(), 1);
+		Ok(())
+	}
+
+	async fn update(&mut self, key: i32, record: &Record) -> Result<()> {
+		let res = self
+			.client
+			.execute(
+				"UPDATE record SET text=$1, integer=$2 WHERE id=$3",
+				&[&record.text, &record.integer, &key],
+			)
+			.await?;
+		assert_eq!(res, 1);
 		Ok(())
 	}
 
