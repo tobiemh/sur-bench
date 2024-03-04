@@ -1,6 +1,6 @@
 # sur-bench
 
-How to use?
+## How to use?
 
 ```bash
 cargo run -r -- --help
@@ -17,6 +17,8 @@ Options:
   -h, --help                 Print help
 ```
 
+## Dry run
+
 Run the benchmark without interaction with any database:
 
 ```bash
@@ -25,15 +27,21 @@ cargo run -r -- -d dry -s 100000 -t 3
 
 Run the benchmark against Postgres:
 
+## Postgresql benchmark
+
 ```bash
 cargo run -r -- -d postgresql -s 100000 -t 3
 ```
 
-Run the benchmark against Postgres:
+## SurrealDB memory benchmark
+
+Run the benchmark against SurrealDB in memory:
 
 ```bash
 cargo run -r -- -d surrealdb-memory -s 100000 -t 3
 ```
+
+## SurrealDB RocksDB benchmark
 
 Run the benchmark against SurreadDB with RocksDB:
 
@@ -41,13 +49,17 @@ Run the benchmark against SurreadDB with RocksDB:
 cargo run -r -- -d surrealdb-rocksdb -s 100000 -t 3
 ```
 
-Run the benchmark against SurrealDB with Memory:
-
-```bash
-cargo run -r -- -d surrealdb-memory -s 100000 -t 3
-```
+## SurrealDB local benchmark
 
 Run the benchmark against an already running SurrealDB instance:
+
+Eg.: Start a Speedb based Surreal instance:
+
+```bash
+ cargo run --features=storage-speedb -r -- start --auth --user root --pass root speedb:/tmp/sur-bench.db
+```
+
+Then run the bench:
 
 ```bash
 cargo run -r -- -d surrealdb -s 100000 -t 3
